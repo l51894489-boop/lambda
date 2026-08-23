@@ -1,10 +1,12 @@
 #pragma OPENCL EXTENSION cl_khr_byte_addressable_store : enable
 #pragma OPENCL EXTENSION cl_khr_global_int32_base_atomics : enable
 
+#define BATCH_SIZE 32
+
 typedef struct { uint v[9]; } fe29_t;
-typedef struct { fe29_t X; fe29_t Y; fe29_t Z; int infinity; } ECPointJacobian_cl;
-typedef struct { ECPointJacobian_cl point; ulong a[4]; } Step_cl;
-typedef struct { ulong a[4]; ulong b[4]; ECPointJacobian_cl R; uint walk_id; uint snapshot_steps; ulong snapshot_x[4]; uint state; } WalkState_cl;
+typedef struct { fe29_t X; fe29_t Y; int infinity; } ECPointAffine_cl;
+typedef struct { ECPointAffine_cl point; ulong a[4]; } Step_cl;
+typedef struct { ulong a[4]; ulong b[4]; ECPointAffine_cl R; uint walk_id; uint snapshot_steps; ulong snapshot_x[4]; uint state; } WalkState_cl;
 typedef struct { ulong a[4]; ulong b[4]; ulong x[4]; uint walk_id; } DPEntry_cl;
 
 #if defined(__OPENCL_VERSION__) || defined(__OPENCL_C_VERSION__)
@@ -108,52 +110,9 @@ inline void fe29_inv(__private fe29_t *r, __private const fe29_t *a) {
     fe29_mul(r, &t, &r_fin);
 }
 
-inline void jacobianAdd(__private ECPointJacobian_cl *R, __private const ECPointJacobian_cl *P, __private const Step_cl *Q) {
-    if (Q->point.infinity) { 
-        for(int i=0; i<9; i++) R->X.v[i] = P->X.v[i];
-        for(int i=0; i<9; i++) R->Y.v[i] = P->Y.v[i];
-        for(int i=0; i<9; i++) R->Z.v[i] = P->Z.v[i];
-        R->infinity = P->infinity; 
-        return; 
-    }
-    if (P->infinity) { 
-        for(int i=0; i<9; i++) R->X.v[i] = Q->point.X.v[i];
-        for(int i=0; i<9; i++) R->Y.v[i] = Q->point.Y.v[i];
-        for(int i=0; i<9; i++) R->Z.v[i] = Q->point.Z.v[i];
-        R->infinity = Q->point.infinity; 
-        return; 
-    }
-
-    fe29_t z2; fe29_sqr(&z2, &P->Z);
-    fe29_t z3; fe29_mul(&z3, &P->Z, &z2);
-    
-    fe29_t u2; fe29_mul(&u2, &Q->point.X, &z2);
-    fe29_t s2; fe29_mul(&s2, &Q->point.Y, &z3);
-    
-    fe29_t h; fe29_sub(&h, &u2, &P->X);
-    fe29_t h_mul2; fe29_mul_int(&h_mul2, &h, 2);
-    fe29_t i; fe29_sqr(&i, &h_mul2);
-    fe29_t j; fe29_mul(&j, &h, &i);
-    
-    fe29_t s2_sub_s1; fe29_sub(&s2_sub_s1, &s2, &P->Y);
-    fe29_t r; fe29_mul_int(&r, &s2_sub_s1, 2);
-    fe29_t v; fe29_mul(&v, &P->X, &i);
-
-    fe29_t r_sqr; fe29_sqr(&r_sqr, &r);
-    fe29_sub(&R->X, &r_sqr, &j);
-    fe29_t v_mul2; fe29_mul_int(&v_mul2, &v, 2);
-    fe29_sub(&R->X, &R->X, &v_mul2);
-
-    fe29_sub(&R->Y, &v, &R->X);
-    fe29_mul(&R->Y, &R->Y, &r);
-    
-    fe29_t s1_j; fe29_mul(&s1_j, &P->Y, &j);
-    fe29_t s1_j_mul2; fe29_mul_int(&s1_j_mul2, &s1_j, 2);
-    fe29_sub(&R->Y, &R->Y, &s1_j_mul2);
-
-    fe29_mul(&R->Z, &P->Z, &h);
-    fe29_mul_int(&R->Z, &R->Z, 2);
-    R->infinity = 0;
+inline void fe29_set_one(__private fe29_t *r) {
+    for(int i=0; i<9; i++) r->v[i] = 0;
+    r->v[0] = 1;
 }
 
 inline ulong murmur_hash3(ulong x) {
@@ -194,93 +153,173 @@ __kernel void kangaroo_walk(
     __global DPEntry_cl *dp_buffer,
     __global uint *dp_count,
     uint step_table_size,
-    uint dp_max_count
+    uint dp_max_count,
+    __global fe29_t *batchInvBuffer
 ) {
     int id = get_global_id(0);
+    int batch_start = id * BATCH_SIZE;
     
-    WalkState_cl w;
-    w.walk_id = walkers[id].walk_id;
-    w.snapshot_steps = walkers[id].snapshot_steps;
-    w.state = walkers[id].state;
-    for(int i=0; i<4; i++) w.a[i] = walkers[id].a[i];
-    for(int i=0; i<4; i++) w.b[i] = walkers[id].b[i];
-    for(int i=0; i<4; i++) w.snapshot_x[i] = walkers[id].snapshot_x[i];
-    w.R.infinity = walkers[id].R.infinity;
-    for(int i=0; i<9; i++) w.R.X.v[i] = walkers[id].R.X.v[i];
-    for(int i=0; i<9; i++) w.R.Y.v[i] = walkers[id].R.Y.v[i];
-    for(int i=0; i<9; i++) w.R.Z.v[i] = walkers[id].R.Z.v[i];
-
+    // We do n_steps_to_run times BATCH_SIZE steps
     for(uint step = 0; step < n_steps_to_run; step++) {
-        fe29_t Zinv; fe29_inv(&Zinv, &w.R.Z);
-        fe29_t Zinv2; fe29_sqr(&Zinv2, &Zinv);
-        fe29_t Zinv3; fe29_mul(&Zinv3, &Zinv2, &Zinv);
-        fe29_t Xaff; fe29_mul(&Xaff, &w.R.X, &Zinv2);
-        fe29_t Yaff; fe29_mul(&Yaff, &w.R.Y, &Zinv3);
         
-        ulong c[9];
-        for(int i=0; i<9; i++) c[i] = Xaff.v[i];
-        fe29_t Xaff_reduced; fe29_reduce(&Xaff_reduced, c);
+        fe29_t cumulative_prod;
+        fe29_set_one(&cumulative_prod);
         
-        ulong X64[4];
-        X64[0] = Xaff_reduced.v[0] | ((ulong)Xaff_reduced.v[1] << 29) | (((ulong)Xaff_reduced.v[2] & 0x3F) << 58);
-        X64[1] = ((ulong)Xaff_reduced.v[2] >> 6) | ((ulong)Xaff_reduced.v[3] << 23) | (((ulong)Xaff_reduced.v[4] & 0x1FFFF) << 52);
-        X64[2] = ((ulong)Xaff_reduced.v[4] >> 17) | ((ulong)Xaff_reduced.v[5] << 12) | (((ulong)Xaff_reduced.v[6] & 0x7FFFFFF) << 41);
-        X64[3] = ((ulong)Xaff_reduced.v[6] >> 27) | ((ulong)Xaff_reduced.v[7] << 2) | ((ulong)Xaff_reduced.v[8] << 31);
+        uint local_step_idx[BATCH_SIZE];
+        bool local_negate[BATCH_SIZE];
         
-        for(int i=0; i<9; i++) c[i] = Yaff.v[i];
-        fe29_t Yaff_reduced; fe29_reduce(&Yaff_reduced, c);
-        bool negate = Yaff_reduced.v[0] & 1;
-        
-        ulong combined = X64[0] ^ (X64[1] << 1) ^ (X64[2] << 2) ^ (X64[3] << 3);
-        uint step_idx = murmur_hash3(combined) % step_table_size;
-        
-        Step_cl step_point;
-        step_point.point.infinity = stepTable[step_idx].point.infinity;
-        for(int i=0; i<4; i++) step_point.a[i] = stepTable[step_idx].a[i];
-        for(int i=0; i<9; i++) step_point.point.X.v[i] = stepTable[step_idx].point.X.v[i];
-        for(int i=0; i<9; i++) step_point.point.Y.v[i] = stepTable[step_idx].point.Y.v[i];
-        for(int i=0; i<9; i++) step_point.point.Z.v[i] = stepTable[step_idx].point.Z.v[i];
-        
-        if (negate) {
-            fe29_neg(&step_point.point.Y, &step_point.point.Y);
-            scalarSub(w.a, step_point.a);
-        } else {
-            scalarAdd(w.a, step_point.a);
+        // 1. FORWARD PASS: accumulate differences
+        for (int i = 0; i < BATCH_SIZE; i++) {
+            int w_id = batch_start + i;
+            
+            // Wait, if a walker is at DP, we should skip it or handle it. 
+            // In OpenCL, if a walker found DP, state == 1, we can just skip it here.
+            uint state = walkers[w_id].state;
+            if (state == 1) {
+                // To keep the batch unbroken, we multiply by 1
+                fe29_t one; fe29_set_one(&one);
+                batchInvBuffer[w_id] = cumulative_prod; 
+                fe29_mul(&cumulative_prod, &cumulative_prod, &one);
+                continue;
+            }
+            
+            fe29_t X;
+            for(int k=0; k<9; k++) X.v[k] = walkers[w_id].R.X.v[k];
+            fe29_t Y;
+            for(int k=0; k<9; k++) Y.v[k] = walkers[w_id].R.Y.v[k];
+            
+            // Reduce X to 64 bits to find jump point
+            ulong c[9];
+            for(int k=0; k<9; k++) c[k] = X.v[k];
+            fe29_t X_reduced; fe29_reduce(&X_reduced, c);
+            
+            ulong X64 = X_reduced.v[0] | ((ulong)X_reduced.v[1] << 29) | (((ulong)X_reduced.v[2] & 0x3F) << 58);
+            
+            // DP check on X64
+            ulong dp_mask = (1ul << dp_bits) - 1;
+            if ((X64 & dp_mask) == 0) {
+                // Hit DP! 
+                uint dp_idx = atomic_inc(dp_count);
+                if (dp_idx < dp_max_count) {
+                    for(int k=0; k<4; k++) dp_buffer[dp_idx].a[k] = walkers[w_id].a[k];
+                    for(int k=0; k<4; k++) dp_buffer[dp_idx].b[k] = walkers[w_id].b[k];
+                    
+                    ulong X64_full[4];
+                    X64_full[0] = X64;
+                    X64_full[1] = ((ulong)X_reduced.v[2] >> 6) | ((ulong)X_reduced.v[3] << 23) | (((ulong)X_reduced.v[4] & 0x1FFFF) << 52);
+                    X64_full[2] = ((ulong)X_reduced.v[4] >> 17) | ((ulong)X_reduced.v[5] << 12) | (((ulong)X_reduced.v[6] & 0x7FFFFFF) << 41);
+                    X64_full[3] = ((ulong)X_reduced.v[6] >> 27) | ((ulong)X_reduced.v[7] << 2) | ((ulong)X_reduced.v[8] << 31);
+                    
+                    for(int k=0; k<4; k++) dp_buffer[dp_idx].x[k] = X64_full[k];
+                    dp_buffer[dp_idx].walk_id = w_id;
+                }
+                walkers[w_id].snapshot_steps = 0;
+                walkers[w_id].state = 1; // Mark as done
+                
+                // Still need to maintain batch product chain
+                fe29_t one; fe29_set_one(&one);
+                batchInvBuffer[w_id] = cumulative_prod; 
+                fe29_mul(&cumulative_prod, &cumulative_prod, &one);
+                continue;
+            }
+            
+            // Not a DP. Find jump index.
+            ulong X64_full[4];
+            X64_full[0] = X64;
+            X64_full[1] = ((ulong)X_reduced.v[2] >> 6) | ((ulong)X_reduced.v[3] << 23) | (((ulong)X_reduced.v[4] & 0x1FFFF) << 52);
+            X64_full[2] = ((ulong)X_reduced.v[4] >> 17) | ((ulong)X_reduced.v[5] << 12) | (((ulong)X_reduced.v[6] & 0x7FFFFFF) << 41);
+            X64_full[3] = ((ulong)X_reduced.v[6] >> 27) | ((ulong)X_reduced.v[7] << 2) | ((ulong)X_reduced.v[8] << 31);
+            
+            ulong combined = X64_full[0] ^ (X64_full[1] << 1) ^ (X64_full[2] << 2) ^ (X64_full[3] << 3);
+            uint step_idx = murmur_hash3(combined) % step_table_size;
+            local_step_idx[i] = step_idx;
+            
+            // Negation map parity
+            for(int k=0; k<9; k++) c[k] = Y.v[k];
+            fe29_t Y_reduced; fe29_reduce(&Y_reduced, c);
+            bool negate = Y_reduced.v[0] & 1;
+            local_negate[i] = negate;
+            
+            // dx = X_0 - X_jmp
+            fe29_t Qx;
+            for(int k=0; k<9; k++) Qx.v[k] = stepTable[step_idx].point.X.v[k];
+            
+            fe29_t dx; fe29_sub(&dx, &X, &Qx);
+            
+            batchInvBuffer[w_id] = cumulative_prod; // Save product up to i-1
+            fe29_mul(&cumulative_prod, &cumulative_prod, &dx); // Multiply by dx_i
         }
         
-        ECPointJacobian_cl new_R;
-        jacobianAdd(&new_R, &w.R, &step_point);
-        for(int i=0; i<9; i++) w.R.X.v[i] = new_R.X.v[i];
-        for(int i=0; i<9; i++) w.R.Y.v[i] = new_R.Y.v[i];
-        for(int i=0; i<9; i++) w.R.Z.v[i] = new_R.Z.v[i];
-        w.R.infinity = new_R.infinity;
-
-        w.snapshot_steps++;
+        // 2. BATCH INVERSION
+        fe29_inv(&cumulative_prod, &cumulative_prod);
         
-        ulong dp_mask = (1ul << dp_bits) - 1;
-        if ((X64[0] & dp_mask) == 0) {
-            uint idx = atomic_inc(dp_count);
-            if (idx < dp_max_count) {
-                for(int k=0; k<4; k++) dp_buffer[idx].a[k] = w.a[k];
-                for(int k=0; k<4; k++) dp_buffer[idx].b[k] = w.b[k];
-                for(int k=0; k<4; k++) dp_buffer[idx].x[k] = X64[k];
-                dp_buffer[idx].walk_id = id;
+        // 3. BACKWARD PASS: compute new points
+        for (int i = BATCH_SIZE - 1; i >= 0; i--) {
+            int w_id = batch_start + i;
+            if (walkers[w_id].state == 1) continue; // Skip resolved DPs
+            
+            // Inverse of dx_i is: cumulative_prod * batchInvBuffer[w_id]
+            fe29_t prev_prod;
+            for(int k=0; k<9; k++) prev_prod.v[k] = batchInvBuffer[w_id].v[k];
+            
+            fe29_t dx_inv; fe29_mul(&dx_inv, &cumulative_prod, &prev_prod);
+            
+            // We must now update cumulative_prod = cumulative_prod * dx_i
+            // So we re-fetch X and Qx
+            fe29_t X;
+            for(int k=0; k<9; k++) X.v[k] = walkers[w_id].R.X.v[k];
+            uint step_idx = local_step_idx[i];
+            
+            fe29_t Qx;
+            for(int k=0; k<9; k++) Qx.v[k] = stepTable[step_idx].point.X.v[k];
+            
+            fe29_t dx; fe29_sub(&dx, &X, &Qx);
+            fe29_mul(&cumulative_prod, &cumulative_prod, &dx); // Restored for i-1
+            
+            // Affine Point Addition
+            fe29_t Y;
+            for(int k=0; k<9; k++) Y.v[k] = walkers[w_id].R.Y.v[k];
+            
+            fe29_t Qy;
+            for(int k=0; k<9; k++) Qy.v[k] = stepTable[step_idx].point.Y.v[k];
+            
+            if (local_negate[i]) {
+                fe29_neg(&Qy, &Qy);
             }
-            w.snapshot_steps = 0;
-            w.state = 1; // DP found
-            break;
+            
+            // s = (Y_0 - Qy) * dx_inv
+            fe29_t s; fe29_sub(&s, &Y, &Qy);
+            fe29_mul(&s, &s, &dx_inv);
+            
+            // X_new = s^2 - X_0 - Qx
+            fe29_t X_new; fe29_sqr(&X_new, &s);
+            fe29_sub(&X_new, &X_new, &X);
+            fe29_sub(&X_new, &X_new, &Qx);
+            
+            // Y_new = s(X_0 - X_new) - Y_0
+            fe29_t Y_new; fe29_sub(&Y_new, &X, &X_new);
+            fe29_mul(&Y_new, &Y_new, &s);
+            fe29_sub(&Y_new, &Y_new, &Y);
+            
+            // Save state
+            for(int k=0; k<9; k++) walkers[w_id].R.X.v[k] = X_new.v[k];
+            for(int k=0; k<9; k++) walkers[w_id].R.Y.v[k] = Y_new.v[k];
+            
+            // Update scalar a
+            ulong Q_a[4];
+            for(int k=0; k<4; k++) Q_a[k] = stepTable[step_idx].a[k];
+            
+            ulong w_a[4];
+            for(int k=0; k<4; k++) w_a[k] = walkers[w_id].a[k];
+            
+            if (local_negate[i]) {
+                scalarSub(w_a, Q_a);
+            } else {
+                scalarAdd(w_a, Q_a);
+            }
+            for(int k=0; k<4; k++) walkers[w_id].a[k] = w_a[k];
+            walkers[w_id].snapshot_steps++;
         }
     }
-    
-    walkers[id].walk_id = w.walk_id;
-    walkers[id].snapshot_steps = w.snapshot_steps;
-    walkers[id].state = w.state;
-    for(int i=0; i<4; i++) walkers[id].a[i] = w.a[i];
-    for(int i=0; i<4; i++) walkers[id].b[i] = w.b[i];
-    for(int i=0; i<4; i++) walkers[id].snapshot_x[i] = w.snapshot_x[i];
-    walkers[id].R.infinity = w.R.infinity;
-    for(int i=0; i<9; i++) walkers[id].R.X.v[i] = w.R.X.v[i];
-    for(int i=0; i<9; i++) walkers[id].R.Y.v[i] = w.R.Y.v[i];
-    for(int i=0; i<9; i++) walkers[id].R.Z.v[i] = w.R.Z.v[i];
 }
 #endif
