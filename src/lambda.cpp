@@ -61,7 +61,6 @@ void fe29_to_uint256_host(uint64_t* out, const fe29_t& in) {
     }
 }
 
-
 constexpr uint256_t N = { 0xBFD25E8CD0364141ULL, 0xBAAEDCE6AF48A03BULL, 0xFFFFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFFFFFULL };
 constexpr uint64_t ONE_MONT[4] = { 0x00000001000003D1ULL, 0x0ULL, 0x0ULL, 0x0ULL };
 constexpr uint64_t SUB2_FP[4] = { 0xFFFFFFFEFFFFFC2DULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL };
@@ -1062,7 +1061,6 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
     for (uint32_t i = 0; i < N_STEPS; i++) {
         fe29_from_uint256_host(host_step_table[i].point.X, localStepTable[i].point.X);
         fe29_from_uint256_host(host_step_table[i].point.Y, localStepTable[i].point.Y);
-        fe29_from_uint256_host(host_step_table[i].point.Z, localStepTable[i].point.Z);
         host_step_table[i].point.infinity = localStepTable[i].point.infinity;
         uint64_t a_arr[4];
         uint256_to_uint64_array(a_arr, localStepTable[i].a);
@@ -1080,7 +1078,6 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
         WalkState* w = &walkers_state[i];
         fe29_from_uint256_host(host_walkers[i].R.X, w->R.X);
         fe29_from_uint256_host(host_walkers[i].R.Y, w->R.Y);
-        fe29_from_uint256_host(host_walkers[i].R.Z, w->R.Z);
         host_walkers[i].R.infinity = w->R.infinity;
         uint64_t a_arr[4], b_arr[4];
         uint256_to_uint64_array(a_arr, w->a);
@@ -1118,8 +1115,10 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
         return false;
     };
     
-    uint32_t kernel_steps = 1; 
+    uint32_t kernel_steps = 4096; 
     
+    cl::Buffer batchInvBuffer(context, CL_MEM_READ_WRITE, sizeof(fe29_t) * WALKERS);
+
     kernel_walk.setArg(0, walkersBuffer);
     kernel_walk.setArg(1, stepTableBuffer);
     kernel_walk.setArg(2, kernel_steps);
@@ -1128,9 +1127,11 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
     kernel_walk.setArg(5, dpCountBuffer);
     kernel_walk.setArg(6, N_STEPS);
     kernel_walk.setArg(7, dp_max_count);
+    kernel_walk.setArg(8, batchInvBuffer);
     
+    size_t active_threads = WALKERS / 32;
     size_t local_ws = 64;
-    size_t global_ws = ((WALKERS + local_ws - 1) / local_ws) * local_ws;
+    size_t global_ws = ((active_threads + local_ws - 1) / local_ws) * local_ws;
     
     auto worker = [&]() {
         try {
@@ -1236,7 +1237,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
                             } else {
                                 // reset walker
                                 reset(w, w->walk_id % 2 == 0);
-                                fe29_from_uint256_host(host_walkers[w_id].R.X, w->R.X); fe29_from_uint256_host(host_walkers[w_id].R.Y, w->R.Y); fe29_from_uint256_host(host_walkers[w_id].R.Z, w->R.Z); host_walkers[w_id].R.infinity = w->R.infinity;
+                            fe29_from_uint256_host(host_walkers[w_id].R.X, w->R.X); fe29_from_uint256_host(host_walkers[w_id].R.Y, w->R.Y); host_walkers[w_id].R.infinity = w->R.infinity;
                                 uint64_t a_arr[4], b_arr[4];
                                 uint256_to_uint64_array(a_arr, w->a); uint256_to_uint64_array(b_arr, w->b);
                                 host_walkers[w_id].a[0] = a_arr[0]; host_walkers[w_id].a[1] = a_arr[1]; host_walkers[w_id].a[2] = a_arr[2]; host_walkers[w_id].a[3] = a_arr[3];
@@ -1247,7 +1248,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
                         } else {
                             // reset walker
                             reset(w, w->walk_id % 2 == 0);
-                            fe29_from_uint256_host(host_walkers[w_id].R.X, w->R.X); fe29_from_uint256_host(host_walkers[w_id].R.Y, w->R.Y); fe29_from_uint256_host(host_walkers[w_id].R.Z, w->R.Z); host_walkers[w_id].R.infinity = w->R.infinity;
+                            fe29_from_uint256_host(host_walkers[w_id].R.X, w->R.X); fe29_from_uint256_host(host_walkers[w_id].R.Y, w->R.Y); host_walkers[w_id].R.infinity = w->R.infinity;
                             uint64_t a_arr[4], b_arr[4];
                             uint256_to_uint64_array(a_arr, w->a); uint256_to_uint64_array(b_arr, w->b);
                             host_walkers[w_id].a[0] = a_arr[0]; host_walkers[w_id].a[1] = a_arr[1]; host_walkers[w_id].a[2] = a_arr[2]; host_walkers[w_id].a[3] = a_arr[3];
@@ -1262,7 +1263,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
                         if (host_walkers[i].state == 2) { // cycled
                             WalkState* w = &walkers_state[i];
                             reset(w, w->walk_id % 2 == 0);
-                            fe29_from_uint256_host(host_walkers[i].R.X, w->R.X); fe29_from_uint256_host(host_walkers[i].R.Y, w->R.Y); fe29_from_uint256_host(host_walkers[i].R.Z, w->R.Z); host_walkers[i].R.infinity = w->R.infinity;
+                            fe29_from_uint256_host(host_walkers[i].R.X, w->R.X); fe29_from_uint256_host(host_walkers[i].R.Y, w->R.Y); host_walkers[i].R.infinity = w->R.infinity;
                             uint64_t a_arr[4], b_arr[4];
                             uint256_to_uint64_array(a_arr, w->a); uint256_to_uint64_array(b_arr, w->b);
                             host_walkers[i].a[0] = a_arr[0]; host_walkers[i].a[1] = a_arr[1]; host_walkers[i].a[2] = a_arr[2]; host_walkers[i].a[3] = a_arr[3];
@@ -1433,7 +1434,6 @@ std::string HexToWif(const std::string& hexKey) {
     return EncodeBase58Check(payload);
 }
 
-/*
 int main(int argc, char* argv[]) {
     std::string pub_key_hex;
     int key_range;
@@ -1570,8 +1570,8 @@ int main(int argc, char* argv[]) {
     delete[] jacEndoH;
     return 0;
 }
-*/
 
+/*
 int main(int argc, char* argv[]) {
     std::string pub_key_hex;
     int key_range;
@@ -1712,3 +1712,4 @@ std::cout << BLUE << "----------------------------------------------------------
 
     return 0;
 }
+*/
