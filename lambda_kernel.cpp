@@ -1,28 +1,6 @@
 #include "lambda_kernel.h"
 #include <cstdint>
-
-// =====================================================================
-// Impede que o compilador quebre ao não encontrar os headers da GPU
-// =====================================================================
-#ifdef __HIPCC__
-    #include <hip/hip_runtime.h>
-#else
-    #ifndef __shared__
-        #define __shared__ 
-    #endif
-    
-    #ifndef __syncthreads
-        inline void __syncthreads() {} // Barreira vazia para compilação CPU
-    #endif
-
-    #ifndef __device__
-        #define __device__
-    #endif
-
-    #ifndef __global__
-        #define __global__
-    #endif
-#endif
+#include <hip/hip_runtime.h>
 
 // MurmurHash3 avalanche mixer otimizado para execução na GPU
 __device__ inline uint32_t murmur3_mix(uint64_t x) {
