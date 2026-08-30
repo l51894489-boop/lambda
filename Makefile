@@ -1,9 +1,20 @@
 TARGET    := lambda
-CXX       := hipcc
+# Auto-detect architecture compiler
+ifneq (,$(shell which nvcc 2>/dev/null))
+  CXX       := nvcc
+  CXXFLAGS  := -O3 -std=c++14 -I. -MD -x cu -Xcompiler -O3,-ffast-math
+else ifneq (,$(shell which hipcc 2>/dev/null))
+  CXX       := hipcc
+  CXXFLAGS  := -O3 -ffast-math -std=c++14 -I. -MD
+else
+  CXX       := g++
+  CXXFLAGS  := -O3 -ffast-math -std=c++14 -I. -MD
+endif
 
+%.o: %.cpp
+	$(CXX) $(CXXFLAGS) -c $< -o $@
 LDLIBS    := -lpthread -ldl -lrt -lcrypto
 
-# Rename cpp files in the Makefile if we want, or keep them as .cpp but compiled with hipcc.
 SRC_CPP   := modinv.cpp lambda.cpp secp256k1.cpp lambda_kernel.cpp
 ifneq (,$(findstring mock,$(MAKECMDGOALS)))
 SRC_CPP += hip_mock.cpp
@@ -16,17 +27,8 @@ OBJ       := $(OBJ_CPP)
 all: $(TARGET)
 
 mock: CXX = g++
-mock: CXXFLAGS += -D__device__= -D__host__= -D__global__= -I./hip
+mock: CXXFLAGS = -O3 -ffast-math -std=c++14 -I. -MD -D__device__= -D__host__= -D__global__= -I./hip
 mock: $(TARGET)
-
-# HIPCC will automatically detect the local architecture when no --offload-arch is specified.
-# However, this assumes you're compiling on the machine you want to run.
-# For optimal performance, we use -O3, -ffast-math, and native offload arch.
-CXXFLAGS  := -O3 -ffast-math -std=c++14 -I. -MD
-
-%.o: %.cpp
-	$(CXX) $(CXXFLAGS) -c $< -o $@
-
 $(TARGET): $(OBJ)
 	$(CXX) $(CXXFLAGS) $(OBJ) -o $@ $(LDLIBS)
 
