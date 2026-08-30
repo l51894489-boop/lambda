@@ -76,12 +76,6 @@ __global__ void lambda_walk_kernel(
     __shared__ uint64_t s_Z[256][4];
     __shared__ uint64_t s_prefix[256][4];
     __shared__ uint64_t s_inv[256][4];
-    __shared__ StepLocal s_stepTable[256];
-
-    if (tid < N_STEPS) {
-        s_stepTable[tid] = d_localStepTable[tid];
-    }
-    __syncthreads();
 
     for (int step = 0; step < 256; step++) {
         uint32_t step_idx = 0;
@@ -91,7 +85,7 @@ __global__ void lambda_walk_kernel(
         if (active) {
             step_idx = get_step_idx(w_X, N_STEPS);
             negate = w_Y[0] & 1;
-            step_point = s_stepTable[step_idx].point;
+            step_point = d_localStepTable[step_idx].point;
             
             if (negate) {
                 uint64_t zero[4] = {0, 0, 0, 0};
@@ -166,9 +160,9 @@ __global__ void lambda_walk_kernel(
             for(int k=0; k<4; k++) w_Y[k] = new_Y[k];
             
             if (negate) {
-                scalarSub(w_a, w_a, s_stepTable[step_idx].a.limbs);
+                scalarSub(w_a, w_a, d_localStepTable[step_idx].a.limbs);
             } else {
-                scalarAdd(w_a, w_a, s_stepTable[step_idx].a.limbs);
+                scalarAdd(w_a, w_a, d_localStepTable[step_idx].a.limbs);
             }
         }
     }
