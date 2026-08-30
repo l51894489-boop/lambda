@@ -1,7 +1,19 @@
 #ifndef HIP_UTILS_H
 #define HIP_UTILS_H
 
-#include <hip/hip_runtime.h>
+#ifdef USE_NVCC
+  #include <cuda_runtime.h>
+  #define hipMalloc cudaMalloc
+  #define hipMemcpy cudaMemcpy
+  #define hipMemcpyDeviceToHost cudaMemcpyDeviceToHost
+  #define hipMemcpyHostToDevice cudaMemcpyHostToDevice
+  #define hipSuccess cudaSuccess
+  #define hipError_t cudaError_t
+  #define hipGetLastError cudaGetLastError
+  #define hipGetErrorString cudaGetErrorString
+#else
+  #include <hip/hip_runtime.h>
+#endif
 #include <iostream>
 #include <cstdlib>
 
