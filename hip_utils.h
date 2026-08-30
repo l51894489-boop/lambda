@@ -11,6 +11,7 @@
   #define hipError_t cudaError_t
   #define hipGetLastError cudaGetLastError
   #define hipGetErrorString cudaGetErrorString
+  #define hipFree cudaFree
 #else
   #include <hip/hip_runtime.h>
 #endif
