@@ -1,6 +1,25 @@
 #include "lambda_kernel.h"
 #include <cstdint>
-#include <hip/hip_runtime.h>
+
+#ifdef __HIPCC__
+    #include <hip/hip_runtime.h>
+#else
+    #ifndef __shared__
+        #define __shared__ 
+    #endif
+    
+    #ifndef __syncthreads
+        inline void __syncthreads() {}
+    #endif
+
+    #ifndef __device__
+        #define __device__
+    #endif
+
+    #ifndef __global__
+        #define __global__
+    #endif
+#endif
 
 // MurmurHash3 avalanche mixer otimizado para execução na GPU
 __device__ inline uint32_t murmur3_mix(uint64_t x) {
