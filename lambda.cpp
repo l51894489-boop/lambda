@@ -975,29 +975,57 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
         return ok;
     };
 
-    DeviceWalkState* d_walkers = nullptr;
+    uint64_t *d_walkers_X, *d_walkers_Y;
+    uint256_t *d_walkers_a, *d_walkers_b;
+    uint32_t *d_walkers_id;
     DPResult* d_dp_buffer = nullptr;
     uint32_t* d_dp_count = nullptr;
     StepLocal* d_localStepTable = nullptr;
     
     // Allocate device memory
-    HIP_CHECK(hipMalloc((void**)&d_walkers, WALKERS * sizeof(DeviceWalkState)));
+    HIP_CHECK(hipMalloc((void**)&d_walkers_X, WALKERS * 4 * sizeof(uint64_t)));
+    HIP_CHECK(hipMalloc((void**)&d_walkers_Y, WALKERS * 4 * sizeof(uint64_t)));
+    HIP_CHECK(hipMalloc((void**)&d_walkers_a, WALKERS * sizeof(uint256_t)));
+    HIP_CHECK(hipMalloc((void**)&d_walkers_b, WALKERS * sizeof(uint256_t)));
+    HIP_CHECK(hipMalloc((void**)&d_walkers_id, WALKERS * sizeof(uint32_t)));
+
     size_t buffer_size = (exp_steps > 1000000) ? 1000000 : (size_t)exp_steps;
     HIP_CHECK(hipMalloc((void**)&d_dp_buffer, buffer_size * sizeof(DPResult)));
     HIP_CHECK(hipMalloc((void**)&d_dp_count, sizeof(uint32_t)));
     HIP_CHECK(hipMalloc((void**)&d_localStepTable, N_STEPS * sizeof(StepLocal)));
     
     // Prepare initial states for device
-    std::vector<DeviceWalkState> host_walkers(WALKERS);
+    std::vector<uint64_t> host_walkers_X(WALKERS * 4);
+    std::vector<uint64_t> host_walkers_Y(WALKERS * 4);
+    std::vector<uint256_t> host_walkers_a(WALKERS);
+    std::vector<uint256_t> host_walkers_b(WALKERS);
+    std::vector<uint32_t> host_walkers_id(WALKERS);
+
+    std::vector<ECPointJacobian> jac_in(WALKERS);
     for (int i = 0; i < WALKERS; i++) {
-        host_walkers[i].a = walkers_state[i].a;
-        host_walkers[i].b = walkers_state[i].b;
-        host_walkers[i].R = walkers_state[i].R;
-        host_walkers[i].walk_id = walkers_state[i].walk_id;
-        for(int k=0; k<4; k++) host_walkers[i].prng_state[k] = 0; // Seeding is handled or not needed if we rely on murmur hash of coordinates
+        jac_in[i] = walkers_state[i].R;
+        host_walkers_a[i] = walkers_state[i].a;
+        host_walkers_b[i] = walkers_state[i].b;
+        host_walkers_id[i] = walkers_state[i].walk_id;
+    }
+
+    std::vector<ECPointAffine> aff_out(WALKERS);
+    std::vector<uint64_t> scratch_prefix(WALKERS * 4);
+    std::vector<uint64_t> scratch_inv(WALKERS * 4);
+    batchJacobianToAffine(aff_out.data(), jac_in.data(), WALKERS, scratch_prefix.data(), scratch_inv.data());
+
+    for (int i = 0; i < WALKERS; i++) {
+        for (int k = 0; k < 4; k++) {
+            host_walkers_X[i * 4 + k] = aff_out[i].x[k];
+            host_walkers_Y[i * 4 + k] = aff_out[i].y[k];
+        }
     }
     
-    HIP_CHECK(hipMemcpy(d_walkers, host_walkers.data(), WALKERS * sizeof(DeviceWalkState), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_walkers_X, host_walkers_X.data(), WALKERS * 4 * sizeof(uint64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_walkers_Y, host_walkers_Y.data(), WALKERS * 4 * sizeof(uint64_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_walkers_a, host_walkers_a.data(), WALKERS * sizeof(uint256_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_walkers_b, host_walkers_b.data(), WALKERS * sizeof(uint256_t), hipMemcpyHostToDevice));
+    HIP_CHECK(hipMemcpy(d_walkers_id, host_walkers_id.data(), WALKERS * sizeof(uint32_t), hipMemcpyHostToDevice));
     
     std::vector<StepLocal> host_step_table(N_STEPS);
     for (uint32_t i = 0; i < N_STEPS; i++) {
@@ -1023,12 +1051,13 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
                 last_ops = current_ops;
 
                 std::string ops_unit = "";
-                if (ops_per_sec >= 1000000000000000000ULL) ops_unit = "Exa ";
-                else if (ops_per_sec >= 1000000000000000ULL) ops_unit = "Peta ";
-                else if (ops_per_sec >= 1000000000000ULL) ops_unit = "Tera ";
-                else if (ops_per_sec >= 1000000000ULL) ops_unit = "Giga ";
-                else if (ops_per_sec >= 1000000ULL) ops_unit = "Mega ";
-                else if (ops_per_sec >= 1000ULL) ops_unit = "Kilo ";
+                double display_ops = ops_per_sec;
+                if (ops_per_sec >= 1000000000000000000ULL) { ops_unit = "Exa "; display_ops /= 1e18; }
+                else if (ops_per_sec >= 1000000000000000ULL) { ops_unit = "Peta "; display_ops /= 1e15; }
+                else if (ops_per_sec >= 1000000000000ULL) { ops_unit = "Tera "; display_ops /= 1e12; }
+                else if (ops_per_sec >= 1000000000ULL) { ops_unit = "Giga "; display_ops /= 1e9; }
+                else if (ops_per_sec >= 1000000ULL) { ops_unit = "Mega "; display_ops /= 1e6; }
+                else if (ops_per_sec >= 1000ULL) { ops_unit = "Kilo "; display_ops /= 1e3; }
 
                 std::string ops_str = std::to_string(ops_per_sec);
                 int insert_pos = ops_str.length() - 3;
@@ -1036,6 +1065,9 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
                     ops_str.insert(insert_pos, ".");
                     insert_pos -= 3;
                 }
+                
+                std::stringstream display_ss;
+                display_ss << std::fixed << std::setprecision(2) << display_ops << " " << ops_unit << "Ops/s (" << ops_str << ")";
 
                 long double k_iters = (long double)current_ops;
                 long double x = (k_iters * k_iters) / (2.0L * M);
@@ -1043,7 +1075,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
                 std::string snapointStatus = snapoint_path.empty() ? "Off" : (resumed_snapoint ? "Restored/" : "") + std::to_string(snapoint_saves.load(std::memory_order_relaxed));
                 if (snapoint_errors.load(std::memory_order_relaxed) > 0) snapointStatus += " Err:" + std::to_string(snapoint_errors.load(std::memory_order_relaxed));
                 std::cout << CYAN << "\033[4A\r" 
-                          << "\033[2KTotal " << ops_unit << "Ops/s: " << RESET << GREEN << ops_str << RESET << "\n"
+                          << "\033[2KSpeed: " << RESET << GREEN << display_ss.str() << RESET << "\n"
                           << CYAN << "\033[2KTotal Ops: " << RESET << GREEN << current_ops << RESET << "\n" 
                           << CYAN << "\033[2KSelf-Collision Cycles: " << RESET << GREEN << total_cycles.load() << RESET << "\n" 
                           << CYAN << "\033[2KCollision Probability: " << RESET << GREEN << std::fixed << std::setprecision(8) << (prob) << "...%" << RESET << CYAN << " | Snapoints: " << RESET << PINK << snapointStatus << RESET << "\n" << std::flush;
@@ -1075,12 +1107,21 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
     // Main GPU launch loop
     while (search_in_progress.load(std::memory_order_acquire)) {
         if (snapoint_gpu_requested.load(std::memory_order_acquire)) {
-            HIP_CHECK(hipMemcpy(host_walkers.data(), d_walkers, WALKERS * sizeof(DeviceWalkState), hipMemcpyDeviceToHost));
+            HIP_CHECK(hipMemcpy(host_walkers_X.data(), d_walkers_X, WALKERS * 4 * sizeof(uint64_t), hipMemcpyDeviceToHost));
+            HIP_CHECK(hipMemcpy(host_walkers_Y.data(), d_walkers_Y, WALKERS * 4 * sizeof(uint64_t), hipMemcpyDeviceToHost));
+            HIP_CHECK(hipMemcpy(host_walkers_a.data(), d_walkers_a, WALKERS * sizeof(uint256_t), hipMemcpyDeviceToHost));
+            HIP_CHECK(hipMemcpy(host_walkers_b.data(), d_walkers_b, WALKERS * sizeof(uint256_t), hipMemcpyDeviceToHost));
+            HIP_CHECK(hipMemcpy(host_walkers_id.data(), d_walkers_id, WALKERS * sizeof(uint32_t), hipMemcpyDeviceToHost));
+
             for(int i = 0; i < WALKERS; i++) {
-                 walkers_state[i].a = host_walkers[i].a;
-                 walkers_state[i].b = host_walkers[i].b;
-                 walkers_state[i].R = host_walkers[i].R;
-                 walkers_state[i].walk_id = host_walkers[i].walk_id;
+                 walkers_state[i].a = host_walkers_a[i];
+                 walkers_state[i].b = host_walkers_b[i];
+                 walkers_state[i].walk_id = host_walkers_id[i];
+                 for (int k = 0; k < 4; k++) {
+                     walkers_state[i].R.X[k] = host_walkers_X[i * 4 + k];
+                     walkers_state[i].R.Y[k] = host_walkers_Y[i * 4 + k];
+                     walkers_state[i].R.Z[k] = ONE_MONT[k];
+                 }
             }
             unsigned long long saved_iters = total_iters.load(std::memory_order_relaxed);
             unsigned long long saved_cycles = total_cycles.load(std::memory_order_relaxed);
@@ -1091,7 +1132,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
         }
 
         unsigned long long added_iters = 0;
-        launch_lambda_kernel(d_walkers, d_dp_buffer, d_dp_count, d_localStepTable, N_STEPS, DP_BITS, WALKERS, &added_iters, key_range);
+        launch_lambda_kernel(d_walkers_X, d_walkers_Y, d_walkers_a, d_walkers_b, d_walkers_id, d_dp_buffer, d_dp_count, d_localStepTable, N_STEPS, DP_BITS, WALKERS, &added_iters, key_range);
         total_iters.fetch_add(added_iters, std::memory_order_relaxed);
         
         uint32_t dp_count = 0;
@@ -1207,7 +1248,11 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
     }
     
     // Cleanup GPU memory
-    hipFree(d_walkers);
+    hipFree(d_walkers_X);
+    hipFree(d_walkers_Y);
+    hipFree(d_walkers_a);
+    hipFree(d_walkers_b);
+    hipFree(d_walkers_id);
     hipFree(d_dp_buffer);
     hipFree(d_dp_count);
     hipFree(d_localStepTable);
@@ -1306,7 +1351,7 @@ std::string HexToWif(const std::string& hexKey) {
 int main(int argc, char* argv[]) {
     std::string pub_key_hex;
     int key_range;
-    int walkers;
+    int walkers = 0;
     int dp = -1;
     std::string snapoint_path;
 
@@ -1338,7 +1383,7 @@ int main(int argc, char* argv[]) {
             std::cerr << ORANGE << "[USAGE]: " << RESET << GREEN << argv[0] << RESET << " --? <?> --? <?> --? <?>\n"
             << GREEN << "*" << RESET << " --pubkey        => Compressed Public Key        <hex> ("<< RED << "*" << RESET << "Required)\n"
             << GREEN << "*" << RESET << " --keyrange      => Key Range Bits               <int> ("<< RED << "*" << RESET << "Required)\n"
-            << GREEN << "*" << RESET << " --walkers       => Number Of Walkers            <int> ("<< RED << "*" << RESET << "Required)\n"
+            << GREEN << "*" << RESET << " --walkers       => Number Of Walkers            <int> ("<< GREEN << "*" << RESET << "Optional)\n"
             << GREEN << "*" << RESET << " --dp            => Distinguished Points Bits    <int> ("<< GREEN << "*" << RESET << "Optional)\n"
             << GREEN << "*" << RESET << " --snaptime      => Snapoints Seconds            <int> 0 disables periodic saves ("<< GREEN << "*" << RESET << "Optional)\n"
             << GREEN << "*" << RESET << " --t             => Work Threads                 <int> ("<< GREEN << "*" << RESET << "Optional)\n";
@@ -1377,6 +1422,18 @@ int main(int argc, char* argv[]) {
         snapoint_path = pub_key_hex + ".saved";
     }
 
+    int mpCnt = 0;
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+    hipDeviceGetAttribute(&mpCnt, hipDeviceAttributeMultiprocessorCount, 0);
+#endif
+    if (walkers == 0) {
+        if (mpCnt > 0) {
+            walkers = mpCnt * 256 * 24;
+        } else {
+            walkers = cores * 512;
+        }
+    }
+
     init_secp256k1(key_range);
 
     std::cout << ORANGE << "[INFO] " << RESET << GREEN << "Press 'Ctrl Z' to Quit\n" << RESET;
@@ -1384,10 +1441,11 @@ int main(int argc, char* argv[]) {
     std::cout << ORANGE << "[INFO] " << RESET << GREEN << "For DP: " << PINK << dp << RESET << GREEN << " the rarity is \033[35m1\033[0m \033[92min " << RESET << PINK << (1ULL << dp) << RESET << GREEN << " points" << RESET << std::endl;
     std::cout << ORANGE << "[INFO] " << RESET << GREEN << "Snapoints File: " << RESET << CYAN << snapoint_path << RESET << std::endl;
     std::cout << ORANGE << "[INFO] " << RESET << GREEN << "Snaptime Interval: " << RESET << PINK << snaptime_sec << RESET << GREEN << "s" << RESET << std::endl;
-    uint64_t max_throughput = cores * 512ULL;
-    if (walkers != max_throughput) {
-        std::cout << ORANGE << "[WRNG] For its " << PINK << cores << RESET << ORANGE << " Cores, Maximum Throughput Reached At: ~" << RESET << PINK << max_throughput << RESET << "." << std::endl;
+    std::cout << ORANGE << "[INFO] " << RESET << GREEN << "Walkers: " << RESET << PINK << walkers << RESET;
+    if (mpCnt > 0 && walkers < mpCnt * 256 * 8) {
+        std::cout << ORANGE << " (Warning: GPU might be bottlenecked, recommended: " << (mpCnt * 256 * 24) << ")";
     }
+    std::cout << RESET << std::endl;
     std::cout << BLUE << "---------------------------------------------------------------------------" << RESET << std::endl;
 
     uint256_t found_key = lambda(pub_key_hex, key_range, walkers, dp, snapoint_path, snaptime_sec);
