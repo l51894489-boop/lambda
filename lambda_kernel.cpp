@@ -1,8 +1,8 @@
 #include "lambda_kernel.h"
 #include <cstdint>
 
-#ifdef __HIPCC__
-    #include <hip/hip_runtime.h>
+#if defined(__HIPCC__) || defined(__NVCC__)
+    #include "hip_utils.h"
 #else
     #ifndef __shared__
         #define __shared__ 
@@ -194,7 +194,7 @@ void launch_lambda_kernel(
     const int block_size = 256; 
     const int grid_size = (total_walkers + block_size - 1) / block_size;
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__NVCC__)
     lambda_walk_kernel<<<grid_size, block_size>>>(
         d_walkers,
         d_dp_buffer,
@@ -214,7 +214,7 @@ void launch_lambda_kernel(
     }
 #endif
 
-#ifdef __HIPCC__
+#if defined(__HIPCC__) || defined(__NVCC__)
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
         printf("GPU KERNEL LAUNCH ERROR: %s\n", hipGetErrorString(err));
