@@ -12,6 +12,8 @@
   #define hipGetLastError cudaGetLastError
   #define hipGetErrorString cudaGetErrorString
   #define hipFree cudaFree
+  #define hipDeviceGetAttribute cudaDeviceGetAttribute
+  #define hipDeviceAttributeMultiprocessorCount cudaDevAttrMultiProcessorCount
 #else
   #include <hip/hip_runtime.h>
 #endif
