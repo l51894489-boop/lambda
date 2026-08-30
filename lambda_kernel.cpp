@@ -217,10 +217,16 @@ void launch_lambda_kernel(
 #ifdef __HIPCC__
     hipError_t err = hipGetLastError();
     if (err != hipSuccess) {
-        // Falha tratada caso HIPCC esteja presente
+        printf("GPU KERNEL LAUNCH ERROR: %s\n", hipGetErrorString(err));
+        return; // Retorna sem incrementar iters para não mentir sobre o progresso
     }
-#endif
-
     // A GPU realiza 256 saltos por pipeline. Multiplicador atualizado rigorosamente.
     *iters += (unsigned long long)total_walkers * 256;
+#else
+    // Emulação Fallback caso compilado sem o stack ROCm
+    // Mock simplificado para não quebrar a estrutura.
+    printf("\n[ERROR] EXECUTANDO EM MODO 'make mock' (CPU) MAS O FALLBACK DA CPU ESTÁ VAZIO!\n");
+    printf("[ERROR] Nenhuma operação está sendo feita. Compile com 'make' nativo na sua máquina de produção.\n");
+    exit(1);
+#endif
 }
