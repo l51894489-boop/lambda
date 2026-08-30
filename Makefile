@@ -18,8 +18,8 @@ ifneq ($(NVCC_BIN),)
   CXXFLAGS  := -O3 -std=c++14 -I. -MD -Xcompiler -O3,-ffast-math -DUSE_NVCC
   
   # Only compile files that contain __device__ code as CUDA
-  secp256k1.o: CXXFLAGS += -x cu
-  lambda_kernel.o: CXXFLAGS += -x cu
+  secp256k1.o: CXXFLAGS += -x cu --expt-relaxed-constexpr
+  lambda_kernel.o: CXXFLAGS += -x cu --expt-relaxed-constexpr
 else ifneq ($(HIPCC_BIN),)
   CXX       := $(HIPCC_BIN)
   CXXFLAGS  := -O3 -ffast-math -std=c++14 -I. -MD
