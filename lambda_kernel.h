@@ -27,7 +27,11 @@ struct DeviceWalkState {
 };
 
 void launch_lambda_kernel(
-    DeviceWalkState* d_walkers,
+    uint64_t* d_walkers_X,
+    uint64_t* d_walkers_Y,
+    uint256_t* d_walkers_a,
+    uint256_t* d_walkers_b,
+    uint32_t* d_walkers_id,
     DPResult* d_dp_buffer,
     uint32_t* d_dp_count,
     const StepLocal* d_localStepTable,
