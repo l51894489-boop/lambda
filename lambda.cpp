@@ -975,7 +975,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
         return ok;
     };
 
-    uint64_t *d_walkers_X, *d_walkers_Y;
+    uint64_t *d_walkers_X, *d_walkers_Y, *d_walkers_s;
     uint256_t *d_walkers_a, *d_walkers_b;
     uint32_t *d_walkers_id;
     DPResult* d_dp_buffer = nullptr;
@@ -985,6 +985,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
     // Allocate device memory
     HIP_CHECK(hipMalloc((void**)&d_walkers_X, WALKERS * 4 * sizeof(uint64_t)));
     HIP_CHECK(hipMalloc((void**)&d_walkers_Y, WALKERS * 4 * sizeof(uint64_t)));
+    HIP_CHECK(hipMalloc((void**)&d_walkers_s, WALKERS * 4 * sizeof(uint64_t)));
     HIP_CHECK(hipMalloc((void**)&d_walkers_a, WALKERS * sizeof(uint256_t)));
     HIP_CHECK(hipMalloc((void**)&d_walkers_b, WALKERS * sizeof(uint256_t)));
     HIP_CHECK(hipMalloc((void**)&d_walkers_id, WALKERS * sizeof(uint32_t)));
@@ -1131,8 +1132,12 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
             snapoint_gpu_requested.store(false, std::memory_order_release);
         }
 
+        const int GROUP_SIZE = 24;
+        int TOTAL_THREADS = WALKERS / GROUP_SIZE;
+        if (WALKERS % GROUP_SIZE != 0) TOTAL_THREADS++;
+
         unsigned long long added_iters = 0;
-        launch_lambda_kernel(d_walkers_X, d_walkers_Y, d_walkers_a, d_walkers_b, d_walkers_id, d_dp_buffer, d_dp_count, d_localStepTable, N_STEPS, DP_BITS, WALKERS, &added_iters, key_range);
+        launch_lambda_kernel(d_walkers_X, d_walkers_Y, d_walkers_s, d_walkers_a, d_walkers_b, d_walkers_id, d_dp_buffer, d_dp_count, d_localStepTable, N_STEPS, DP_BITS, TOTAL_THREADS, GROUP_SIZE, &added_iters, key_range);
         total_iters.fetch_add(added_iters, std::memory_order_relaxed);
         
         uint32_t dp_count = 0;
@@ -1250,6 +1255,7 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
     // Cleanup GPU memory
     hipFree(d_walkers_X);
     hipFree(d_walkers_Y);
+    hipFree(d_walkers_s);
     hipFree(d_walkers_a);
     hipFree(d_walkers_b);
     hipFree(d_walkers_id);
