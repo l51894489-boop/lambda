@@ -14,6 +14,8 @@
 
 #include "secp256k1.h"
 
+#include <boost/serialization/nvp.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
 using boost::multiprecision::cpp_int;
 using BigInt = cpp_int;
 using std::make_tuple;
