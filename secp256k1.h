@@ -15,8 +15,7 @@
 
 #include "hip_utils.h"
 
-#include <boost/serialization/nvp.hpp>
-#include <boost/multiprecision/cpp_int.hpp>
+
 #include <stdint.h>
 #include "parallel_hashmap/phmap.h"
 #include <condition_variable>
@@ -48,7 +47,7 @@ struct uint256_t {
     uint64_t limbs[4];
 };
 
-typedef boost::multiprecision::cpp_int BigInt;
+
 
 typedef struct {
     uint64_t x[4];
