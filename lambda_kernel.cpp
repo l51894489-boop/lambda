@@ -37,6 +37,7 @@ __device__ inline bool DP(const uint64_t* aff_x, int DP_BITS) {
 __global__ void lambda_walk_kernel(
     uint64_t* d_walkers_X,
     uint64_t* d_walkers_Y,
+    uint64_t* d_walkers_s,
     uint256_t* d_walkers_a,
     uint256_t* d_walkers_b,
     uint32_t* d_walkers_id,
@@ -45,141 +46,162 @@ __global__ void lambda_walk_kernel(
     const StepLocal* d_localStepTable,
     uint32_t N_STEPS,
     int DP_BITS,
-    int total_walkers,
+    int total_threads,
+    int group_size,
     int key_range
 ) {
     int tid = threadIdx.x;
     int global_id = blockIdx.x * blockDim.x + tid;
     
-    bool active = (global_id < total_walkers);
-    uint64_t w_X[4] = {0,0,0,0}, w_Y[4] = {0,0,0,0};
-    uint64_t w_a[4] = {0,0,0,0}, w_b[4] = {0,0,0,0};
-    uint32_t w_walk_id = 0;
-
-    if (active) {
-        for(int k=0; k<4; k++) {
-            w_X[k] = d_walkers_X[global_id * 4 + k];
-            w_Y[k] = d_walkers_Y[global_id * 4 + k];
-        }
-        for(int k=0; k<4; k++) w_a[k] = d_walkers_a[global_id].limbs[k];
-        for(int k=0; k<4; k++) w_b[k] = d_walkers_b[global_id].limbs[k];
-        w_walk_id = d_walkers_id[global_id];
-    }
+    if (global_id >= total_threads) return;
 
     uint64_t exp_steps = 1ULL << (key_range / 2);
     uint32_t max_buffer_size = (exp_steps > 1000000ULL) ? 1000000 : static_cast<uint32_t>(exp_steps);
 
-    const int CHUNK_SIZE = 32;
-    int chunk_id = tid / CHUNK_SIZE;
-    int lane_id  = tid % CHUNK_SIZE;
+    // Number of steps per kernel launch. 10 loops of 24 points = 240 steps.
+    const int LOOPS = 10;
     
-    __shared__ uint64_t s_Z[256][4];
-    __shared__ uint64_t s_prefix[256][4];
-    __shared__ uint64_t s_inv[256][4];
-
-    for (int step = 0; step < 256; step++) {
-        uint32_t step_idx = 0;
-        bool negate = false;
-        ECPointJacobian step_point;
+    for (int loop = 0; loop < LOOPS; loop++) {
+        uint64_t inverse[4] = {0, 0, 0, 0};
+        uint32_t step_indices[32]; // Max group size 32
+        bool negates[32];
         
-        if (active) {
-            step_idx = get_step_idx(w_X, N_STEPS);
-            negate = w_Y[0] & 1;
-            step_point = d_localStepTable[step_idx].point;
+        // ETAPA 1: Computação do DX e acúmulo dos prefixos em Global Memory (L2 Cache)
+        for (int group = 0; group < group_size; group++) {
+            uint64_t x[4];
+            uint64_t y[4];
             
+            int idx = group * total_threads + global_id;
+            int base_idx = idx * 4;
+            
+            for (int k = 0; k < 4; k++) {
+                x[k] = d_walkers_X[base_idx + k];
+                y[k] = d_walkers_Y[base_idx + k];
+            }
+            
+            step_indices[group] = get_step_idx(x, N_STEPS);
+            negates[group] = y[0] & 1;
+            
+            ECPointJacobian step_point = d_localStepTable[step_indices[group]].point;
+            
+            uint64_t dx[4];
+            modSubP(dx, x, step_point.X);
+            if (scalarIsZero(dx)) {
+                dx[0] = 0x00000001000003D1ULL;
+                dx[1] = 0; dx[2] = 0; dx[3] = 0;
+            }
+            
+            if (group == 0) {
+                for (int k = 0; k < 4; k++) inverse[k] = dx[k];
+            } else {
+                modMulMontP(inverse, inverse, dx);
+            }
+            
+            for (int k = 0; k < 4; k++) {
+                d_walkers_s[base_idx + k] = inverse[k];
+            }
+        }
+        
+        // ETAPA 2: Batch Inversion INDIVIDUAL (Cada thread inverte os seus 24 pontos)
+        // Uso de ALU a 100% (Sem warp divergence)
+        uint64_t P_MINUS_2[4] = {0xFFFFFFFEFFFFFC2DULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
+        modExpMontP(inverse, inverse, P_MINUS_2);
+        
+        // ETAPA 3: Recuperação da inversão e Acúmulo Afim
+        for (int group = group_size - 1; group >= 0; group--) {
+            uint64_t x[4];
+            uint64_t y[4];
+            uint64_t my_dx_inv[4];
+            
+            int idx = group * total_threads + global_id;
+            int base_idx = idx * 4;
+            
+            for (int k = 0; k < 4; k++) {
+                x[k] = d_walkers_X[base_idx + k];
+                y[k] = d_walkers_Y[base_idx + k];
+            }
+            
+            ECPointJacobian step_point = d_localStepTable[step_indices[group]].point;
+            bool negate = negates[group];
             if (negate) {
                 uint64_t zero[4] = {0, 0, 0, 0};
                 modSubP(step_point.Y, zero, step_point.Y);
             }
             
-            modSubP(s_Z[tid], w_X, step_point.X);
-            if (scalarIsZero(s_Z[tid])) {
-                s_Z[tid][0] = 0x00000001000003D1ULL;
+            if (group > 0) {
+                uint64_t dx[4];
+                modSubP(dx, x, step_point.X);
+                if (scalarIsZero(dx)) {
+                    dx[0] = 0x00000001000003D1ULL;
+                    dx[1] = 0; dx[2] = 0; dx[3] = 0;
+                }
+                
+                uint64_t prev_prefix[4];
+                int prev_base = ((group - 1) * total_threads + global_id) * 4;
+                for (int k = 0; k < 4; k++) prev_prefix[k] = d_walkers_s[prev_base + k];
+                
+                modMulMontP(my_dx_inv, prev_prefix, inverse);
+                modMulMontP(inverse, inverse, dx);
+            } else {
+                for (int k = 0; k < 4; k++) my_dx_inv[k] = inverse[k];
             }
-        } else {
-            s_Z[tid][0] = 0x00000001000003D1ULL;
-            s_Z[tid][1] = 0; s_Z[tid][2] = 0; s_Z[tid][3] = 0;
-        }
-        __syncthreads(); 
-
-        if (lane_id == 0) {
-            int base = chunk_id * CHUNK_SIZE;
             
-            for(int k=0; k<4; k++) s_prefix[base][k] = s_Z[base][k];
-            for (int i = 1; i < CHUNK_SIZE; i++) {
-                modMulMontP(s_prefix[base + i], s_prefix[base + i - 1], s_Z[base + i]);
-            }
-            
-            uint64_t P_MINUS_2[4];
-            P_MINUS_2[0] = 0xFFFFFFFEFFFFFC2DULL;
-            P_MINUS_2[1] = 0xFFFFFFFFFFFFFFFFULL;
-            P_MINUS_2[2] = 0xFFFFFFFFFFFFFFFFULL;
-            P_MINUS_2[3] = 0xFFFFFFFFFFFFFFFFULL;
-
-            modExpMontP(s_inv[base + CHUNK_SIZE - 1], s_prefix[base + CHUNK_SIZE - 1], P_MINUS_2);
-            
-            for (int i = CHUNK_SIZE - 1; i > 0; i--) {
-                modMulMontP(s_inv[base + i - 1], s_inv[base + i], s_Z[base + i]);
-                modMulMontP(s_inv[base + i], s_inv[base + i], s_prefix[base + i - 1]);
-            }
-        }
-        __syncthreads();
-
-        if (active) {
-            if (DP(w_X, DP_BITS)) {
-                uint32_t idx = atomicAdd(d_dp_count, 1);
-                if (idx < max_buffer_size) {
-                    for(int k=0; k<4; k++) d_dp_buffer[idx].x[k] = w_X[k];
-                    for(int k=0; k<4; k++) d_dp_buffer[idx].a.limbs[k] = w_a[k];
-                    for(int k=0; k<4; k++) d_dp_buffer[idx].b.limbs[k] = w_b[k];
-                    d_dp_buffer[idx].walk_id = w_walk_id;
+            // DP Check
+            if (DP(x, DP_BITS)) {
+                uint32_t dp_idx = atomicAdd(d_dp_count, 1);
+                if (dp_idx < max_buffer_size) {
+                    for(int k=0; k<4; k++) d_dp_buffer[dp_idx].x[k] = x[k];
+                    for(int k=0; k<4; k++) d_dp_buffer[dp_idx].a.limbs[k] = d_walkers_a[idx].limbs[k];
+                    for(int k=0; k<4; k++) d_dp_buffer[dp_idx].b.limbs[k] = d_walkers_b[idx].limbs[k];
+                    d_dp_buffer[dp_idx].walk_id = d_walkers_id[idx];
                 } else {
                     atomicSub(d_dp_count, 1);
                 }
             }
-
+            
+            // Affine Addition
             uint64_t dy[4];
-            modSubP(dy, w_Y, step_point.Y);
+            modSubP(dy, y, step_point.Y);
             
             uint64_t lambda[4];
-            modMulMontP(lambda, dy, s_inv[tid]);
+            modMulMontP(lambda, dy, my_dx_inv);
             
             uint64_t lambda_sq[4];
             modMulMontP(lambda_sq, lambda, lambda);
             
             uint64_t new_X[4];
-            modSubP(new_X, lambda_sq, w_X);
+            modSubP(new_X, lambda_sq, x);
             modSubP(new_X, new_X, step_point.X);
             
             uint64_t new_Y[4];
-            modSubP(new_Y, w_X, new_X);
+            modSubP(new_Y, x, new_X);
             modMulMontP(new_Y, lambda, new_Y);
-            modSubP(new_Y, new_Y, w_Y);
+            modSubP(new_Y, new_Y, y);
             
-            for(int k=0; k<4; k++) w_X[k] = new_X[k];
-            for(int k=0; k<4; k++) w_Y[k] = new_Y[k];
+            for (int k = 0; k < 4; k++) {
+                d_walkers_X[base_idx + k] = new_X[k];
+                d_walkers_Y[base_idx + k] = new_Y[k];
+            }
+            
+            // Atualiza os escalares
+            uint256_t w_a;
+            for (int k = 0; k < 4; k++) w_a.limbs[k] = d_walkers_a[idx].limbs[k];
             
             if (negate) {
-                scalarSub(w_a, w_a, d_localStepTable[step_idx].a.limbs);
+                scalarSub(w_a.limbs, w_a.limbs, d_localStepTable[step_indices[group]].a.limbs);
             } else {
-                scalarAdd(w_a, w_a, d_localStepTable[step_idx].a.limbs);
+                scalarAdd(w_a.limbs, w_a.limbs, d_localStepTable[step_indices[group]].a.limbs);
             }
+            
+            for (int k = 0; k < 4; k++) d_walkers_a[idx].limbs[k] = w_a.limbs[k];
         }
-    }
-    
-    if (active) {
-        for(int k=0; k<4; k++) {
-            d_walkers_X[global_id * 4 + k] = w_X[k];
-            d_walkers_Y[global_id * 4 + k] = w_Y[k];
-        }
-        for(int k=0; k<4; k++) d_walkers_a[global_id].limbs[k] = w_a[k];
-        for(int k=0; k<4; k++) d_walkers_b[global_id].limbs[k] = w_b[k];
     }
 }
 
 void launch_lambda_kernel(
     uint64_t* d_walkers_X,
     uint64_t* d_walkers_Y,
+    uint64_t* d_walkers_s,
     uint256_t* d_walkers_a,
     uint256_t* d_walkers_b,
     uint32_t* d_walkers_id,
@@ -188,17 +210,19 @@ void launch_lambda_kernel(
     const StepLocal* d_localStepTable,
     uint32_t N_STEPS,
     int DP_BITS,
-    int total_walkers,
+    int total_threads,
+    int group_size,
     unsigned long long* iters,
     int key_range
 ) {
     const int block_size = 256; 
-    const int grid_size = (total_walkers + block_size - 1) / block_size;
+    const int grid_size = (total_threads + block_size - 1) / block_size;
 
 #if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
     lambda_walk_kernel<<<grid_size, block_size>>>(
         d_walkers_X,
         d_walkers_Y,
+        d_walkers_s,
         d_walkers_a,
         d_walkers_b,
         d_walkers_id,
@@ -207,11 +231,12 @@ void launch_lambda_kernel(
         d_localStepTable,
         N_STEPS,
         DP_BITS,
-        total_walkers,
+        total_threads,
+        group_size,
         key_range
     );
 #else
-    for (int tid = 0; tid < total_walkers; tid++) {}
+    for (int tid = 0; tid < total_threads; tid++) {}
 #endif
 
 #if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
@@ -220,7 +245,8 @@ void launch_lambda_kernel(
         printf("GPU KERNEL LAUNCH ERROR: %s\n", hipGetErrorString(err));
         return; 
     }
-    *iters += (unsigned long long)total_walkers * 256;
+    // LOOPS = 10. Total steps = LOOPS * group_size * total_threads
+    *iters += (unsigned long long)total_threads * group_size * 10;
 #else
     printf("\n[ERROR] EXECUTANDO EM MODO 'make mock' (CPU) MAS O FALLBACK DA CPU ESTÁ VAZIO!\n");
     printf("[ERROR] Nenhuma operação está sendo feita. Compile com 'make' nativo na sua máquina de produção.\n");
