@@ -3,6 +3,8 @@
 
 #if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
     #include "hip_utils.h"
+    #include "gpu_math_types.h"
+    #include "gpu_math_inline_ptx.h"
 #else
     #ifndef __shared__
         #define __shared__ 
@@ -85,7 +87,11 @@ __global__ void lambda_walk_kernel(
             ECPointJacobian step_point = d_localStepTable[step_indices[group]].point;
             
             uint64_t dx[4];
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+            SubModP(dx, x, step_point.X);
+#else
             modSubP(dx, x, step_point.X);
+#endif
             if (scalarIsZero(dx)) {
                 dx[0] = 0x00000001000003D1ULL;
                 dx[1] = 0; dx[2] = 0; dx[3] = 0;
@@ -94,7 +100,11 @@ __global__ void lambda_walk_kernel(
             if (group == 0) {
                 for (int k = 0; k < 4; k++) inverse[k] = dx[k];
             } else {
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+                MulModP(inverse, inverse, dx);
+#else
                 modMulMontP(inverse, inverse, dx);
+#endif
             }
             
             for (int k = 0; k < 4; k++) {
@@ -104,8 +114,12 @@ __global__ void lambda_walk_kernel(
         
         // ETAPA 2: Batch Inversion INDIVIDUAL (Cada thread inverte os seus 24 pontos)
         // Uso de ALU a 100% (Sem warp divergence)
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+        InvModP((u32*)inverse);
+#else
         uint64_t P_MINUS_2[4] = {0xFFFFFFFEFFFFFC2DULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL, 0xFFFFFFFFFFFFFFFFULL};
         modExpMontP(inverse, inverse, P_MINUS_2);
+#endif
         
         // ETAPA 3: Recuperação da inversão e Acúmulo Afim
         for (int group = group_size - 1; group >= 0; group--) {
@@ -125,12 +139,20 @@ __global__ void lambda_walk_kernel(
             bool negate = negates[group];
             if (negate) {
                 uint64_t zero[4] = {0, 0, 0, 0};
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+                SubModP(step_point.Y, zero, step_point.Y);
+#else
                 modSubP(step_point.Y, zero, step_point.Y);
+#endif
             }
             
             if (group > 0) {
                 uint64_t dx[4];
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+                SubModP(dx, x, step_point.X);
+#else
                 modSubP(dx, x, step_point.X);
+#endif
                 if (scalarIsZero(dx)) {
                     dx[0] = 0x00000001000003D1ULL;
                     dx[1] = 0; dx[2] = 0; dx[3] = 0;
@@ -140,8 +162,13 @@ __global__ void lambda_walk_kernel(
                 int prev_base = ((group - 1) * total_threads + global_id) * 4;
                 for (int k = 0; k < 4; k++) prev_prefix[k] = d_walkers_s[prev_base + k];
                 
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+                MulModP(my_dx_inv, prev_prefix, inverse);
+                MulModP(inverse, inverse, dx);
+#else
                 modMulMontP(my_dx_inv, prev_prefix, inverse);
                 modMulMontP(inverse, inverse, dx);
+#endif
             } else {
                 for (int k = 0; k < 4; k++) my_dx_inv[k] = inverse[k];
             }
@@ -161,6 +188,24 @@ __global__ void lambda_walk_kernel(
             
             // Affine Addition
             uint64_t dy[4];
+#if defined(__HIPCC__) || defined(__CUDACC__) || defined(USE_NVCC)
+            SubModP(dy, y, step_point.Y);
+            
+            uint64_t lambda[4];
+            MulModP(lambda, dy, my_dx_inv);
+            
+            uint64_t lambda_sq[4];
+            MulModP(lambda_sq, lambda, lambda);
+            
+            uint64_t new_X[4];
+            SubModP(new_X, lambda_sq, x);
+            SubModP(new_X, new_X, step_point.X);
+            
+            uint64_t new_Y[4];
+            SubModP(new_Y, x, new_X);
+            MulModP(new_Y, lambda, new_Y);
+            SubModP(new_Y, new_Y, y);
+#else
             modSubP(dy, y, step_point.Y);
             
             uint64_t lambda[4];
@@ -177,6 +222,7 @@ __global__ void lambda_walk_kernel(
             modSubP(new_Y, x, new_X);
             modMulMontP(new_Y, lambda, new_Y);
             modSubP(new_Y, new_Y, y);
+#endif
             
             for (int k = 0; k < 4; k++) {
                 d_walkers_X[base_idx + k] = new_X[k];
