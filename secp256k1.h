@@ -15,6 +15,7 @@
 
 #include "hip_utils.h"
 
+#include <boost/serialization/nvp.hpp>
 #include <boost/multiprecision/cpp_int.hpp>
 #include <stdint.h>
 #include "parallel_hashmap/phmap.h"
