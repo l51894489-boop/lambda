@@ -678,12 +678,10 @@ void batchJacobianToAffine(ECPointAffine* aff_out, const ECPointJacobian* jac_in
         uint64_t z2[4], z3[4], tmp_mont[4];
 
         modMulMontP(z2, z_inv, z_inv);
-        modMulMontP(tmp_mont, jac_in[i].X, z2);
-        fromMontgomeryP(aff_out[i].x, tmp_mont);
+        modMulMontP(aff_out[i].x, jac_in[i].X, z2);
 
         modMulMontP(z3, z2, z_inv);
-        modMulMontP(tmp_mont, jac_in[i].Y, z3);
-        fromMontgomeryP(aff_out[i].y, tmp_mont);
+        modMulMontP(aff_out[i].y, jac_in[i].Y, z3);
 
         aff_out[i].infinity = 0;
     }
@@ -775,7 +773,11 @@ uint256_t lambda(std::string target_pubkey_hex, int key_range, int WALKERS, int 
         jacobianScalarMultPhi(&localStepTable[i].point, preCompG, preCompGphi, a_tmp, windowSize);
         ECPointAffine aff_step;
         jacobianToAffine(&aff_step, &localStepTable[i].point);
-        affineToJacobian(&localStepTable[i].point, &aff_step);
+        for(int k=0; k<4; k++) {
+            localStepTable[i].point.X[k] = aff_step.x[k];
+            localStepTable[i].point.Y[k] = aff_step.y[k];
+            localStepTable[i].point.Z[k] = 0;
+        }
     }
 
     DPTable dp_table;
