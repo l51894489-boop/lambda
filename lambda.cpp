@@ -14,6 +14,10 @@
 
 #include "secp256k1.h"
 #include "lambda_kernel.h"
+#include <boost/serialization/nvp.hpp>
+#include <boost/multiprecision/cpp_int.hpp>
+
+typedef boost::multiprecision::cpp_int BigInt;
 
 constexpr uint256_t N = { 0xBFD25E8CD0364141ULL, 0xBAAEDCE6AF48A03BULL, 0xFFFFFFFFFFFFFFFEULL, 0xFFFFFFFFFFFFFFFFULL };
 constexpr uint64_t ONE_MONT[4] = { 0x00000001000003D1ULL, 0x0ULL, 0x0ULL, 0x0ULL };
