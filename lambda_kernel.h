@@ -29,6 +29,7 @@ struct DeviceWalkState {
 void launch_lambda_kernel(
     uint64_t* d_walkers_X,
     uint64_t* d_walkers_Y,
+    uint64_t* d_walkers_s,
     uint256_t* d_walkers_a,
     uint256_t* d_walkers_b,
     uint32_t* d_walkers_id,
@@ -37,7 +38,8 @@ void launch_lambda_kernel(
     const StepLocal* d_localStepTable,
     uint32_t N_STEPS,
     int DP_BITS,
-    int local_count,
+    int total_threads,
+    int group_size,
     unsigned long long* iters,
     int key_range
 );
